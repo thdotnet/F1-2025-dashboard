@@ -304,30 +304,47 @@ class ConnectionManager:
     """Manages WebSocket connections and broadcasts."""
 
     def __init__(self):
-        self.active_connections: Set = set()
+        self.active_connections: Dict[Any, asyncio.Queue] = {}
 
     def connect(self, ws):
-        self.active_connections.add(ws)
+        # Queue of size 1: always holds only the latest message
+        self.active_connections[ws] = asyncio.Queue(maxsize=1)
+        asyncio.create_task(self._writer(ws))
         logger.info("Client connected. Total: %d", len(self.active_connections))
 
     def disconnect(self, ws):
-        self.active_connections.discard(ws)
+        self.active_connections.pop(ws, None)
         logger.info("Client disconnected. Total: %d", len(self.active_connections))
+
+    async def _writer(self, ws):
+        """Per-client writer loop: sends latest message from queue."""
+        queue = self.active_connections.get(ws)
+        if not queue:
+            return
+        try:
+            while ws in self.active_connections:
+                message = await queue.get()
+                await ws.send(message)
+        except Exception:
+            self.disconnect(ws)
 
     async def broadcast(self, message: str):
         if not self.active_connections:
             return
-        disconnected = set()
-        # Send to all clients concurrently with a timeout
-        async def _send(ws):
+        disconnected = []
+        for ws, queue in list(self.active_connections.items()):
             try:
-                await asyncio.wait_for(ws.send(message), timeout=0.1)
+                # Drop old message if queue is full, replace with latest
+                if queue.full():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                queue.put_nowait(message)
             except Exception:
-                disconnected.add(ws)
-
-        await asyncio.gather(*[_send(ws) for ws in list(self.active_connections)])
+                disconnected.append(ws)
         for ws in disconnected:
-            self.active_connections.discard(ws)
+            self.active_connections.pop(ws, None)
 
 
 manager = ConnectionManager()
