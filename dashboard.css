@@ -247,7 +247,8 @@ body {
 }
 
 #panel-throttle-brake,
-#panel-speed-chart {
+#panel-speed-chart,
+#panel-engine {
     max-height: 200px;
     overflow: hidden;
 }
