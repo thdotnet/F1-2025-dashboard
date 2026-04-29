@@ -144,9 +144,9 @@ CAR_MOTION_FIELDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# LapData (per car) - 55 bytes
+# LapData (per car) - 57 bytes
 # ---------------------------------------------------------------------------
-LAP_DATA_FORMAT = "<IIHBHBHHfffBBBBBBBBBBBBBBBHHBfB"
+LAP_DATA_FORMAT = "<IIHBHBHBHBfffBBBBBBBBBBBBBBBHHBfB"
 LAP_DATA_SIZE = struct.calcsize(LAP_DATA_FORMAT)
 
 LAP_DATA_FIELDS = [
@@ -157,7 +157,9 @@ LAP_DATA_FIELDS = [
     "sector2_time_ms",
     "sector2_time_minutes",
     "delta_to_car_in_front_ms",
+    "delta_to_car_in_front_minutes",
     "delta_to_race_leader_ms",
+    "delta_to_race_leader_minutes",
     "lap_distance",
     "total_distance",
     "safety_car_delta",
@@ -459,6 +461,16 @@ class PacketParser:
             LAP_DATA_FIELDS, player_idx
         )
         player["session_time"] = header["session_time"]
+
+        # Combine ms + minutes parts into total milliseconds for deltas
+        player["delta_to_car_in_front_ms"] = (
+            player["delta_to_car_in_front_minutes"] * 60000
+            + player["delta_to_car_in_front_ms"]
+        )
+        player["delta_to_race_leader_ms"] = (
+            player["delta_to_race_leader_minutes"] * 60000
+            + player["delta_to_race_leader_ms"]
+        )
 
         # Format time values for display
         if player["last_lap_time_ms"] > 0:
