@@ -318,11 +318,14 @@ class ConnectionManager:
         if not self.active_connections:
             return
         disconnected = set()
-        for ws in list(self.active_connections):
+        # Send to all clients concurrently with a timeout
+        async def _send(ws):
             try:
-                await ws.send(message)
+                await asyncio.wait_for(ws.send(message), timeout=0.1)
             except Exception:
                 disconnected.add(ws)
+
+        await asyncio.gather(*[_send(ws) for ws in list(self.active_connections)])
         for ws in disconnected:
             self.active_connections.discard(ws)
 
@@ -345,8 +348,6 @@ telemetry_state: Dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # UDP Listener
 # ---------------------------------------------------------------------------
-# Signal that new data is available for broadcast
-_new_data_event = asyncio.Event()
 
 
 class F1UDPProtocol(asyncio.DatagramProtocol):
@@ -368,9 +369,6 @@ class F1UDPProtocol(asyncio.DatagramProtocol):
             telemetry_state[packet_type] = parsed
             telemetry_state["connected"] = True
             telemetry_state["last_packet_time"] = time.time()
-
-            # Signal broadcast loop that new data is available
-            _new_data_event.set()
 
             # Record to session file
             header = self.parser.parse_header(data)
@@ -402,40 +400,26 @@ async def start_udp_listener():
 # Broadcast Loop
 # ---------------------------------------------------------------------------
 async def broadcast_loop():
-    """Broadcast telemetry state to WebSocket clients when new data arrives."""
+    """Broadcast telemetry state to WebSocket clients at a fixed rate."""
     rate = config["telemetry"]["broadcast_rate_hz"]
-    min_interval = 1.0 / rate
-
-    last_broadcast = 0.0
+    interval = 1.0 / rate
 
     while True:
-        # Wait for new data signal (with timeout for connection checks)
-        try:
-            await asyncio.wait_for(_new_data_event.wait(), timeout=1.0)
-            _new_data_event.clear()
-        except asyncio.TimeoutError:
-            # Check for stale connection even if no new data
-            if telemetry_state["connected"] and time.time() - telemetry_state["last_packet_time"] > 5:
-                telemetry_state["connected"] = False
-            continue
-
-        # Throttle: skip if we broadcast too recently
-        now = time.time()
-        elapsed = now - last_broadcast
-        if elapsed < min_interval:
-            await asyncio.sleep(min_interval - elapsed)
-            now = time.time()
+        await asyncio.sleep(interval)
 
         if not manager.active_connections:
             continue
 
-        if time.time() - telemetry_state["last_packet_time"] > 5:
+        if telemetry_state["connected"] and time.time() - telemetry_state["last_packet_time"] > 5:
             telemetry_state["connected"] = False
 
+        if not telemetry_state["connected"]:
+            continue
+
         try:
+            # Always serialize fresh state right before sending
             message = json.dumps(telemetry_state, default=str)
             await manager.broadcast(message)
-            last_broadcast = time.time()
         except Exception as e:
             logger.error("Broadcast error: %s", e)
 
