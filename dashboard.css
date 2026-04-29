@@ -97,7 +97,7 @@ body {
 /* Dashboard Grid */
 .dashboard-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: 8px;
     padding: 8px;
     max-width: 1800px;
@@ -130,7 +130,7 @@ body {
 }
 
 .wide-panel {
-    grid-column: span 2;
+    grid-column: span 3;
 }
 
 /* Speed Panel */
@@ -140,7 +140,7 @@ body {
 
 .big-number {
     font-family: var(--font-mono);
-    font-size: 56px;
+    font-size: 40px;
     font-weight: 700;
     line-height: 1;
     color: var(--text-primary);
@@ -158,7 +158,7 @@ body {
 }
 
 .gear-display {
-    font-size: 64px;
+    font-size: 48px;
     color: var(--accent-cyan);
 }
 
@@ -395,7 +395,10 @@ body {
 /* Responsive */
 @media (max-width: 1200px) {
     .dashboard-grid {
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(4, 1fr);
+    }
+    .wide-panel {
+        grid-column: span 2;
     }
 }
 
@@ -406,8 +409,8 @@ body {
     .wide-panel {
         grid-column: span 2;
     }
-    .big-number { font-size: 40px; }
-    .gear-display { font-size: 48px; }
+    .big-number { font-size: 36px; }
+    .gear-display { font-size: 40px; }
 }
 
 @media (max-width: 600px) {
