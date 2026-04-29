@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>F1 2025 Telemetry Dashboard</title>
+    <link rel="stylesheet" href="/dashboard.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <!-- Connection Status Bar -->
+    <header id="status-bar">
+        <div class="status-left">
+            <span class="logo">🏎️ F1 TELEMETRY</span>
+            <span id="connection-status" class="status-badge disconnected">DISCONNECTED</span>
+        </div>
+        <div class="status-center">
+            <span id="session-info">Waiting for data...</span>
+        </div>
+        <div class="status-right">
+            <span id="weather-info">--</span>
+            <span id="track-temp">Track: --°C</span>
+            <span id="air-temp">Air: --°C</span>
+        </div>
+    </header>
+
+    <!-- Main Dashboard Grid -->
+    <main class="dashboard-grid">
+
+        <!-- Row 1: Key Telemetry Numbers -->
+        <section class="panel speed-panel" id="panel-speed">
+            <h3>SPEED</h3>
+            <div class="big-number" id="speed-value">0</div>
+            <div class="unit">KM/H</div>
+        </section>
+
+        <section class="panel gear-panel" id="panel-gear">
+            <h3>GEAR</h3>
+            <div class="big-number gear-display" id="gear-value">N</div>
+            <div class="rev-bar-container">
+                <div class="rev-bar" id="rev-bar"></div>
+            </div>
+            <div class="sub-value" id="rpm-value">0 RPM</div>
+        </section>
+
+        <section class="panel drs-panel" id="panel-drs">
+            <h3>DRS</h3>
+            <div class="drs-indicator" id="drs-indicator">OFF</div>
+            <div class="sub-value" id="suggested-gear">--</div>
+        </section>
+
+        <section class="panel lap-panel" id="panel-lap">
+            <h3>LAP INFO</h3>
+            <div class="lap-grid">
+                <div class="lap-item">
+                    <span class="lap-label">Position</span>
+                    <span class="lap-value" id="position-value">--</span>
+                </div>
+                <div class="lap-item">
+                    <span class="lap-label">Lap</span>
+                    <span class="lap-value" id="lap-number">--</span>
+                </div>
+                <div class="lap-item">
+                    <span class="lap-label">Current</span>
+                    <span class="lap-value" id="current-lap-time">--:--:---</span>
+                </div>
+                <div class="lap-item">
+                    <span class="lap-label">Last Lap</span>
+                    <span class="lap-value" id="last-lap-time">--:--:---</span>
+                </div>
+                <div class="lap-item">
+                    <span class="lap-label">Sector</span>
+                    <span class="lap-value" id="sector-value">--</span>
+                </div>
+                <div class="lap-item">
+                    <span class="lap-label">Delta Front</span>
+                    <span class="lap-value" id="delta-front">--</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Row 2: Time Series Charts -->
+        <section class="panel wide-panel" id="panel-throttle-brake">
+            <h3>THROTTLE & BRAKE</h3>
+            <canvas id="chart-throttle-brake"></canvas>
+        </section>
+
+        <section class="panel" id="panel-speed-chart">
+            <h3>SPEED TRACE</h3>
+            <canvas id="chart-speed"></canvas>
+        </section>
+
+        <!-- Row 3: Track Map & G-Force -->
+        <section class="panel" id="panel-track-map">
+            <h3>TRACK MAP</h3>
+            <canvas id="canvas-track-map"></canvas>
+        </section>
+
+        <section class="panel" id="panel-gforce">
+            <h3>G-FORCE</h3>
+            <canvas id="canvas-gforce"></canvas>
+            <div class="gforce-values">
+                <span id="gforce-lat">Lat: 0.0g</span>
+                <span id="gforce-long">Long: 0.0g</span>
+            </div>
+        </section>
+
+        <section class="panel" id="panel-steering">
+            <h3>STEERING</h3>
+            <canvas id="canvas-steering"></canvas>
+        </section>
+
+        <!-- Row 4: Tyre & Brake Temps -->
+        <section class="panel" id="panel-tyre-temps">
+            <h3>TYRE TEMPERATURES</h3>
+            <div class="tyre-layout">
+                <div class="tyre-row">
+                    <div class="tyre-box" id="tyre-fl">
+                        <div class="tyre-label">FL</div>
+                        <div class="tyre-temp-inner" id="tyre-fl-inner">--°</div>
+                        <div class="tyre-temp-surface" id="tyre-fl-surface">--°</div>
+                    </div>
+                    <div class="tyre-box" id="tyre-fr">
+                        <div class="tyre-label">FR</div>
+                        <div class="tyre-temp-inner" id="tyre-fr-inner">--°</div>
+                        <div class="tyre-temp-surface" id="tyre-fr-surface">--°</div>
+                    </div>
+                </div>
+                <div class="tyre-row">
+                    <div class="tyre-box" id="tyre-rl">
+                        <div class="tyre-label">RL</div>
+                        <div class="tyre-temp-inner" id="tyre-rl-inner">--°</div>
+                        <div class="tyre-temp-surface" id="tyre-rl-surface">--°</div>
+                    </div>
+                    <div class="tyre-box" id="tyre-rr">
+                        <div class="tyre-label">RR</div>
+                        <div class="tyre-temp-inner" id="tyre-rr-inner">--°</div>
+                        <div class="tyre-temp-surface" id="tyre-rr-surface">--°</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel" id="panel-brake-temps">
+            <h3>BRAKE TEMPERATURES</h3>
+            <div class="tyre-layout">
+                <div class="tyre-row">
+                    <div class="brake-box" id="brake-fl">
+                        <div class="tyre-label">FL</div>
+                        <div class="brake-temp-value" id="brake-fl-temp">--°</div>
+                    </div>
+                    <div class="brake-box" id="brake-fr">
+                        <div class="tyre-label">FR</div>
+                        <div class="brake-temp-value" id="brake-fr-temp">--°</div>
+                    </div>
+                </div>
+                <div class="tyre-row">
+                    <div class="brake-box" id="brake-rl">
+                        <div class="tyre-label">RL</div>
+                        <div class="brake-temp-value" id="brake-rl-temp">--°</div>
+                    </div>
+                    <div class="brake-box" id="brake-rr">
+                        <div class="tyre-label">RR</div>
+                        <div class="brake-temp-value" id="brake-rr-temp">--°</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel" id="panel-tyre-pressure">
+            <h3>TYRE PRESSURES (PSI)</h3>
+            <div class="tyre-layout">
+                <div class="tyre-row">
+                    <div class="pressure-box" id="pressure-fl">
+                        <div class="tyre-label">FL</div>
+                        <div class="pressure-value" id="pressure-fl-val">--</div>
+                    </div>
+                    <div class="pressure-box" id="pressure-fr">
+                        <div class="tyre-label">FR</div>
+                        <div class="pressure-value" id="pressure-fr-val">--</div>
+                    </div>
+                </div>
+                <div class="tyre-row">
+                    <div class="pressure-box" id="pressure-rl">
+                        <div class="tyre-label">RL</div>
+                        <div class="pressure-value" id="pressure-rl-val">--</div>
+                    </div>
+                    <div class="pressure-box" id="pressure-rr">
+                        <div class="tyre-label">RR</div>
+                        <div class="pressure-value" id="pressure-rr-val">--</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Row 5: ERS, Fuel, Tyre Compound -->
+        <section class="panel" id="panel-ers">
+            <h3>ERS ENERGY</h3>
+            <div class="bar-container">
+                <div class="bar-fill ers-bar" id="ers-bar"></div>
+            </div>
+            <div class="bar-label" id="ers-label">0%</div>
+            <div class="ers-details">
+                <span id="ers-mode">Mode: --</span>
+                <span id="ers-deployed">Deployed: --</span>
+            </div>
+        </section>
+
+        <section class="panel" id="panel-fuel">
+            <h3>FUEL</h3>
+            <div class="bar-container">
+                <div class="bar-fill fuel-bar" id="fuel-bar"></div>
+            </div>
+            <div class="fuel-details">
+                <span id="fuel-remaining">Remaining: -- kg</span>
+                <span id="fuel-laps">Laps left: --</span>
+            </div>
+        </section>
+
+        <section class="panel" id="panel-tyres">
+            <h3>TYRE INFO</h3>
+            <div class="tyre-compound" id="tyre-compound">--</div>
+            <div class="tyre-age" id="tyre-age">Age: -- laps</div>
+            <div class="sub-value" id="fuel-mix">Fuel Mix: --</div>
+            <div class="sub-value" id="brake-bias">Brake Bias: --%</div>
+        </section>
+
+        <section class="panel" id="panel-engine">
+            <h3>ENGINE</h3>
+            <canvas id="chart-rpm"></canvas>
+        </section>
+
+    </main>
+
+    <script src="/charts.js"></script>
+    <script src="/app.js"></script>
+</body>
+</html>

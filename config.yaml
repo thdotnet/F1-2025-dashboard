@@ -1,0 +1,45 @@
+# F1 Telemetry Dashboard Configuration
+# -----------------------------------------
+# All settings are configurable - nothing is hardcoded.
+# Override with environment variables prefixed with F1_
+# e.g., F1_UDP_PORT=20778
+
+udp:
+  # IP to bind the UDP listener (0.0.0.0 = all interfaces)
+  host: "0.0.0.0"
+  # Port the F1 game sends telemetry to (default in-game: 20777)
+  port: 20777
+
+web:
+  # Host/port for the web dashboard server
+  host: "0.0.0.0"
+  port: 8000
+  # Set to your domain when hosting on Azure
+  allowed_origins:
+    - "*"
+
+telemetry:
+  # How often to push updates to the browser (Hz)
+  broadcast_rate_hz: 20
+  # Seconds of history to keep for time-series charts
+  history_seconds: 60
+  # Number of cars on the grid (F1 2025 = 22)
+  num_cars: 22
+
+game:
+  # Expected packet format year - used for validation
+  packet_format: 2025
+
+logging:
+  # debug, info, warning, error
+  level: "info"
+
+storage:
+  # Enable/disable local data persistence
+  enabled: true
+  # Directory for session JSON files (created automatically)
+  data_dir: "data"
+  # How often to flush buffered data to disk (seconds)
+  flush_interval_seconds: 5
+  # How often to sample telemetry for storage (Hz, lower = smaller files)
+  sample_rate_hz: 4
