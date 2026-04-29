@@ -253,32 +253,33 @@ class SessionRecorder:
         logger.info("New session started → %s", filename)
 
     def flush(self):
-        """Write buffered samples to disk."""
+        """Write buffered samples to disk (append-only for performance)."""
         if not self.enabled or not self._session_file or not self._samples:
             return
 
         try:
-            # Read existing data if file exists (append mode)
-            existing_samples = []
-            if self._session_file.exists():
-                with open(self._session_file, "r") as f:
-                    existing = json.load(f)
-                    existing_samples = existing.get("samples", [])
-
-            all_samples = existing_samples + self._samples
-
-            data = {
-                **self._session_meta,
-                "total_samples": len(all_samples),
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-                "samples": all_samples,
-            }
-
-            with open(self._session_file, "w") as f:
-                json.dump(data, f, separators=(",", ":"))
-
-            flushed_count = len(self._samples)
+            samples_to_write = self._samples
             self._samples = []
+
+            if not self._session_file.exists():
+                # Create new file with metadata
+                data = {
+                    **self._session_meta,
+                    "total_samples": len(samples_to_write),
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                    "samples": samples_to_write,
+                }
+                with open(self._session_file, "w") as f:
+                    json.dump(data, f, separators=(",", ":"))
+            else:
+                # Append samples efficiently: read, extend, write
+                # Use a separate append file to avoid re-reading large files
+                append_file = self._session_file.with_suffix(".jsonl")
+                with open(append_file, "a") as f:
+                    for sample in samples_to_write:
+                        f.write(json.dumps(sample, separators=(",", ":")) + "\n")
+
+            flushed_count = len(samples_to_write)
             logger.debug("Flushed %d samples to %s", flushed_count, self._session_file.name)
         except Exception as e:
             logger.error("Failed to flush session data: %s", e)
@@ -387,10 +388,12 @@ class F1UDPProtocol(asyncio.DatagramProtocol):
             telemetry_state["connected"] = True
             telemetry_state["last_packet_time"] = time.time()
 
-            # Record to session file
-            header = self.parser.parse_header(data)
-            if header:
-                recorder.record(str(header["session_uid"]), telemetry_state)
+            # Record to session file (reuse header from parse)
+            header = parsed.get("session_time")
+            if header is not None:
+                session_uid = self.parser.parse_header(data)
+                if session_uid:
+                    recorder.record(str(session_uid["session_uid"]), telemetry_state)
 
     def error_received(self, exc):
         self.error_count += 1
@@ -442,11 +445,13 @@ async def broadcast_loop():
 
 
 async def flush_loop():
-    """Periodically flush recorded session data to disk."""
+    """Periodically flush recorded session data to disk in a thread (non-blocking)."""
     interval = config.get("storage", {}).get("flush_interval_seconds", 5)
+    loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(interval)
-        recorder.flush()
+        if recorder.enabled and recorder._samples:
+            await loop.run_in_executor(None, recorder.flush)
 
 
 # ---------------------------------------------------------------------------
