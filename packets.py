@@ -116,9 +116,10 @@ TELEMETRY_EXTRA_FIELDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# CarMotionData (per car) - 72 bytes (18 floats)
+# CarMotionData (per car) - 60 bytes
+# 6 floats (position + velocity) + 6 int16 (forward + right dirs) + 6 floats (g-force + rotation)
 # ---------------------------------------------------------------------------
-CAR_MOTION_FORMAT = "<18f"
+CAR_MOTION_FORMAT = "<6f6h6f"
 CAR_MOTION_SIZE = struct.calcsize(CAR_MOTION_FORMAT)
 
 CAR_MOTION_FIELDS = [
@@ -143,9 +144,9 @@ CAR_MOTION_FIELDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# LapData (per car) - ~50 bytes
+# LapData (per car) - 55 bytes
 # ---------------------------------------------------------------------------
-LAP_DATA_FORMAT = "<IIHHHHHHfBBBBBBBBBBBBBBBHHBfB"
+LAP_DATA_FORMAT = "<IIHBHBHHfffBBBBBBBBBBBBBBBHHBfB"
 LAP_DATA_SIZE = struct.calcsize(LAP_DATA_FORMAT)
 
 LAP_DATA_FIELDS = [
@@ -157,6 +158,8 @@ LAP_DATA_FIELDS = [
     "sector2_time_minutes",
     "delta_to_car_in_front_ms",
     "delta_to_race_leader_ms",
+    "lap_distance",
+    "total_distance",
     "safety_car_delta",
     "car_position",
     "current_lap_num",
@@ -414,16 +417,20 @@ class PacketParser:
         self, data: bytes, header: Dict, player_idx: int
     ) -> Dict[str, Any]:
         offset = HEADER_SIZE
+        max_cars = min(self.num_cars, (len(data) - offset) // CAR_MOTION_SIZE)
 
         # Player car data
-        player = self._parse_car_data(
-            data, offset, self._car_motion_struct,
-            CAR_MOTION_FIELDS, player_idx
-        )
+        if player_idx < max_cars:
+            player = self._parse_car_data(
+                data, offset, self._car_motion_struct,
+                CAR_MOTION_FIELDS, player_idx
+            )
+        else:
+            player = dict.fromkeys(CAR_MOTION_FIELDS, 0.0)
 
         # All cars positions for the track map
         all_positions = []
-        for i in range(self.num_cars):
+        for i in range(max_cars):
             try:
                 car_offset = offset + (i * CAR_MOTION_SIZE)
                 values = self._car_motion_struct.unpack_from(data, car_offset)

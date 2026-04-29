@@ -20,7 +20,7 @@ web:
 
 telemetry:
   # How often to push updates to the browser (Hz)
-  broadcast_rate_hz: 20
+  broadcast_rate_hz: 60
   # Seconds of history to keep for time-series charts
   history_seconds: 60
   # Number of cars on the grid (F1 2025 = 22)

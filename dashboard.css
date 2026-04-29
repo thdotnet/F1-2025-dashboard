@@ -246,6 +246,12 @@ body {
     min-height: 100px;
 }
 
+#panel-throttle-brake,
+#panel-speed-chart {
+    max-height: 200px;
+    overflow: hidden;
+}
+
 /* Track Map & G-Force */
 #canvas-track-map, #canvas-gforce, #canvas-steering {
     width: 100%;

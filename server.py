@@ -47,7 +47,7 @@ def load_config() -> Dict[str, Any]:
         "udp": {"host": "0.0.0.0", "port": 20777},
         "web": {"host": "0.0.0.0", "port": 8000, "allowed_origins": ["*"]},
         "telemetry": {
-            "broadcast_rate_hz": 20,
+            "broadcast_rate_hz": 60,
             "history_seconds": 60,
             "num_cars": 22,
         },
@@ -318,7 +318,7 @@ class ConnectionManager:
         if not self.active_connections:
             return
         disconnected = set()
-        for ws in self.active_connections:
+        for ws in list(self.active_connections):
             try:
                 await ws.send(message)
             except Exception:
@@ -345,6 +345,10 @@ telemetry_state: Dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # UDP Listener
 # ---------------------------------------------------------------------------
+# Signal that new data is available for broadcast
+_new_data_event = asyncio.Event()
+
+
 class F1UDPProtocol(asyncio.DatagramProtocol):
     """Async UDP protocol handler for F1 telemetry packets."""
 
@@ -364,6 +368,9 @@ class F1UDPProtocol(asyncio.DatagramProtocol):
             telemetry_state[packet_type] = parsed
             telemetry_state["connected"] = True
             telemetry_state["last_packet_time"] = time.time()
+
+            # Signal broadcast loop that new data is available
+            _new_data_event.set()
 
             # Record to session file
             header = self.parser.parse_header(data)
@@ -395,21 +402,42 @@ async def start_udp_listener():
 # Broadcast Loop
 # ---------------------------------------------------------------------------
 async def broadcast_loop():
-    """Periodically broadcast telemetry state to all WebSocket clients."""
+    """Broadcast telemetry state to WebSocket clients when new data arrives."""
     rate = config["telemetry"]["broadcast_rate_hz"]
-    interval = 1.0 / rate
+    min_interval = 1.0 / rate
+
+    last_broadcast = 0.0
 
     while True:
-        if manager.active_connections and telemetry_state["connected"]:
-            try:
-                if time.time() - telemetry_state["last_packet_time"] > 5:
-                    telemetry_state["connected"] = False
+        # Wait for new data signal (with timeout for connection checks)
+        try:
+            await asyncio.wait_for(_new_data_event.wait(), timeout=1.0)
+            _new_data_event.clear()
+        except asyncio.TimeoutError:
+            # Check for stale connection even if no new data
+            if telemetry_state["connected"] and time.time() - telemetry_state["last_packet_time"] > 5:
+                telemetry_state["connected"] = False
+            continue
 
-                message = json.dumps(telemetry_state, default=str)
-                await manager.broadcast(message)
-            except Exception as e:
-                logger.error("Broadcast error: %s", e)
-        await asyncio.sleep(interval)
+        # Throttle: skip if we broadcast too recently
+        now = time.time()
+        elapsed = now - last_broadcast
+        if elapsed < min_interval:
+            await asyncio.sleep(min_interval - elapsed)
+            now = time.time()
+
+        if not manager.active_connections:
+            continue
+
+        if time.time() - telemetry_state["last_packet_time"] > 5:
+            telemetry_state["connected"] = False
+
+        try:
+            message = json.dumps(telemetry_state, default=str)
+            await manager.broadcast(message)
+            last_broadcast = time.time()
+        except Exception as e:
+            logger.error("Broadcast error: %s", e)
 
 
 async def flush_loop():
