@@ -168,3 +168,104 @@
         init();
     }
 })();
+
+// ---------------------------------------------------------------------------
+// Session Controls (global scope for onclick handlers)
+// ---------------------------------------------------------------------------
+async function startSession() {
+    const btn = document.getElementById('btn-start-session');
+    btn.disabled = true;
+    try {
+        const resp = await fetch('/api/session/start', { method: 'POST' });
+        const data = await resp.json();
+        if (data.ok) {
+            document.getElementById('session-info').textContent = 'Session recording...';
+        }
+    } catch (e) {
+        console.error('Start session failed:', e);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function stopSession() {
+    const btn = document.getElementById('btn-stop-session');
+    btn.disabled = true;
+    try {
+        const resp = await fetch('/api/session/stop', { method: 'POST' });
+        const data = await resp.json();
+        if (data.ok) {
+            document.getElementById('session-info').textContent = `Session saved (${data.samples} samples)`;
+        }
+    } catch (e) {
+        console.error('Stop session failed:', e);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function requestAIFeedback() {
+    const btn = document.getElementById('btn-ai-feedback');
+    btn.disabled = true;
+    btn.classList.add('loading');
+    btn.textContent = '🤖 Analyzing...';
+
+    try {
+        const resp = await fetch('/api/ai-feedback', { method: 'POST' });
+        const data = await resp.json();
+        console.log('AI Feedback response:', data);
+
+        if (data.ok) {
+            console.log('AI Agent says:', data.feedback);
+            speakText(data.feedback);
+        } else {
+            console.warn('AI Feedback error:', data.error);
+            speakText('Sorry, I could not get AI feedback at this time.');
+        }
+    } catch (e) {
+        console.error('AI Feedback failed:', e);
+        speakText('Sorry, I could not get AI feedback at this time.');
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+        btn.textContent = '🤖 AI Feedback';
+    }
+}
+
+function speakText(text) {
+    if (!('speechSynthesis' in window)) {
+        console.warn('Speech synthesis not supported');
+        return;
+    }
+    window.speechSynthesis.cancel();
+    // Strip markdown formatting for cleaner speech
+    const cleanText = text
+        .replace(/###?\s*/g, '')
+        .replace(/[-*]\s+/g, '')
+        .replace(/\n+/g, '. ');
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    utterance.rate = 1.1;
+    utterance.pitch = 1.0;
+
+    function setVoiceAndSpeak() {
+        const voices = window.speechSynthesis.getVoices();
+        console.log('Available voices:', voices.map(v => v.name));
+        const avaVoice = voices.find(v => v.name.includes('Ava') && v.name.includes('Natural'))
+            || voices.find(v => v.name.includes('Ava') && v.lang.startsWith('en'))
+            || voices.find(v => v.lang.startsWith('en') && v.name.includes('Natural'))
+            || voices.find(v => v.lang.startsWith('en'));
+        if (avaVoice) {
+            console.log('Using voice:', avaVoice.name);
+            utterance.voice = avaVoice;
+        }
+        window.speechSynthesis.speak(utterance);
+    }
+
+    // Voices may not be loaded yet — wait for them
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length > 0) {
+        setVoiceAndSpeak();
+    } else {
+        window.speechSynthesis.onvoiceschanged = setVoiceAndSpeak;
+    }
+}

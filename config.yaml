@@ -43,3 +43,11 @@ storage:
   flush_interval_seconds: 5
   # How often to sample telemetry for storage (Hz, lower = smaller files)
   sample_rate_hz: 4
+
+foundry:
+  # Azure AI Foundry endpoint for the AI race engineer agent
+  endpoint: "https://<YOUR_FOUNDRY_SERVICE>.services.ai.azure.com/api/projects/<YOUR_FOUNDRY_PROJECT>"
+  # Agent name as configured in Foundry
+  agent_name: "RaceAIEngineer"
+  # Agent version
+  agent_version: "2"

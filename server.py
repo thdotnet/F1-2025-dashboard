@@ -1,8 +1,8 @@
 """
 F1 2025 Telemetry Dashboard Server.
 
-Uses only Python stdlib (asyncio, http.server) plus the 'websockets' library
-for WebSocket support. No FastAPI, no aiohttp, no pydantic.
+Orchestrates UDP telemetry ingestion, WebSocket broadcasting, HTTP API,
+session recording, and AI feedback via Azure Foundry.
 """
 
 import asyncio
@@ -10,10 +10,8 @@ import json
 import logging
 import os
 import time
-import mimetypes
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Set, List, Optional
+from typing import Dict, Any
 from http import HTTPStatus
 
 import yaml
@@ -25,7 +23,10 @@ except ImportError:
     print("ERROR: 'websockets' package not installed. Run: pip install websockets")
     raise
 
-from packets import PacketParser
+from recorder import SessionRecorder
+from websocket_manager import ConnectionManager
+from udp_listener import start_udp_listener
+from foundry_agent import call_foundry_agent, collect_session_data
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -42,7 +43,6 @@ def load_config() -> Dict[str, Any]:
     else:
         config = {}
 
-    # Defaults
     defaults = {
         "udp": {"host": "0.0.0.0", "port": 20777},
         "web": {"host": "0.0.0.0", "port": 8000, "allowed_origins": ["*"]},
@@ -59,6 +59,11 @@ def load_config() -> Dict[str, Any]:
             "flush_interval_seconds": 5,
             "sample_rate_hz": 4,
         },
+        "foundry": {
+            "endpoint": "",
+            "agent_name": "",
+            "agent_version": "1",
+        },
     }
 
     def merge(base, override):
@@ -70,7 +75,7 @@ def load_config() -> Dict[str, Any]:
 
     merge(defaults, config)
 
-    # Environment variable overrides (F1_UDP_PORT, F1_WEB_PORT, etc.)
+    # Environment variable overrides
     env_map = {
         "F1_UDP_HOST": ("udp", "host"),
         "F1_UDP_PORT": ("udp", "port", int),
@@ -101,258 +106,13 @@ logging.basicConfig(
 logger = logging.getLogger("f1dashboard")
 
 # ---------------------------------------------------------------------------
-# Static file directory
+# Shared state
 # ---------------------------------------------------------------------------
 STATIC_DIR = Path(__file__).parent
 
-
-# ---------------------------------------------------------------------------
-# Session Recorder - persists telemetry to JSON files
-# ---------------------------------------------------------------------------
-class SessionRecorder:
-    """Records telemetry data to JSON files, one file per game session."""
-
-    def __init__(self, cfg: Dict[str, Any]):
-        storage_cfg = cfg.get("storage", {})
-        self.enabled = storage_cfg.get("enabled", True)
-        self.data_dir = Path(storage_cfg.get("data_dir", "data"))
-        self.flush_interval = storage_cfg.get("flush_interval_seconds", 5)
-        self.sample_rate = storage_cfg.get("sample_rate_hz", 4)
-        self.sample_interval = 1.0 / self.sample_rate
-
-        self._current_session_uid: Optional[str] = None
-        self._session_file: Optional[Path] = None
-        self._samples: List[Dict[str, Any]] = []
-        self._session_meta: Dict[str, Any] = {}
-        self._last_sample_time: float = 0
-        self._total_samples: int = 0
-
-        if self.enabled:
-            self.data_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Session recorder enabled → %s", self.data_dir.resolve())
-
-    def record(self, session_uid: str, state: Dict[str, Any]):
-        """Record a telemetry snapshot if enough time has elapsed."""
-        if not self.enabled:
-            return
-
-        now = time.time()
-
-        # Detect new session
-        if session_uid and session_uid != self._current_session_uid:
-            self._start_new_session(session_uid, state)
-
-        # Sample at configured rate
-        if now - self._last_sample_time < self.sample_interval:
-            return
-
-        self._last_sample_time = now
-
-        # Build a compact snapshot (skip empty dicts and non-data keys)
-        snapshot = {"t": round(state.get("telemetry", {}).get("session_time", 0), 3)}
-
-        tel = state.get("telemetry", {})
-        if tel:
-            snapshot["tel"] = {
-                "speed": tel.get("speed", 0),
-                "throttle": round(tel.get("throttle", 0), 3),
-                "brake": round(tel.get("brake", 0), 3),
-                "steer": round(tel.get("steer", 0), 3),
-                "gear": tel.get("gear", 0),
-                "rpm": tel.get("engine_rpm", 0),
-                "drs": tel.get("drs", 0),
-                "engine_temp": tel.get("engine_temperature", 0),
-                "brakes_temp": [
-                    tel.get("brakes_temp_rl", 0), tel.get("brakes_temp_rr", 0),
-                    tel.get("brakes_temp_fl", 0), tel.get("brakes_temp_fr", 0),
-                ],
-                "tyres_inner": [
-                    tel.get("tyres_inner_temp_rl", 0), tel.get("tyres_inner_temp_rr", 0),
-                    tel.get("tyres_inner_temp_fl", 0), tel.get("tyres_inner_temp_fr", 0),
-                ],
-                "tyres_surface": [
-                    tel.get("tyres_surface_temp_rl", 0), tel.get("tyres_surface_temp_rr", 0),
-                    tel.get("tyres_surface_temp_fl", 0), tel.get("tyres_surface_temp_fr", 0),
-                ],
-                "tyres_pressure": [
-                    round(tel.get("tyres_pressure_rl", 0), 1),
-                    round(tel.get("tyres_pressure_rr", 0), 1),
-                    round(tel.get("tyres_pressure_fl", 0), 1),
-                    round(tel.get("tyres_pressure_fr", 0), 1),
-                ],
-            }
-
-        mot = state.get("motion", {})
-        if mot:
-            snapshot["mot"] = {
-                "x": round(mot.get("world_position_x", 0), 1),
-                "z": round(mot.get("world_position_z", 0), 1),
-                "g_lat": round(mot.get("g_force_lateral", 0), 2),
-                "g_lon": round(mot.get("g_force_longitudinal", 0), 2),
-            }
-
-        lap = state.get("lap_data", {})
-        if lap:
-            snapshot["lap"] = {
-                "pos": lap.get("car_position", 0),
-                "lap_num": lap.get("current_lap_num", 0),
-                "lap_time_ms": lap.get("current_lap_time_ms", 0),
-                "last_lap_ms": lap.get("last_lap_time_ms", 0),
-                "sector": lap.get("sector", 0),
-                "lap_dist": round(lap.get("lap_distance", 0), 1) if lap.get("lap_distance") else 0,
-            }
-
-        status = state.get("car_status", {})
-        if status:
-            snapshot["status"] = {
-                "fuel": round(status.get("fuel_in_tank", 0), 2),
-                "fuel_laps": round(status.get("fuel_remaining_laps", 0), 1),
-                "ers_pct": status.get("ers_percent", 0),
-                "ers_mode": status.get("ers_deploy_mode", 0),
-                "tyre": status.get("visual_tyre_name", ""),
-                "tyre_age": status.get("tyres_age_laps", 0),
-            }
-
-        self._samples.append(snapshot)
-        self._total_samples += 1
-
-        # Update session metadata with latest session info
-        sess = state.get("session", {})
-        if sess and sess.get("track_name"):
-            self._session_meta["track"] = sess.get("track_name", "")
-            self._session_meta["session_type"] = sess.get("session_type_name", "")
-            self._session_meta["weather"] = sess.get("weather_name", "")
-
-    def _start_new_session(self, session_uid: str, state: Dict[str, Any]):
-        """Flush current session and start a new one."""
-        if self._current_session_uid:
-            self.flush()
-            logger.info(
-                "Session ended: %s (%d samples saved)",
-                self._session_file.name if self._session_file else "?",
-                self._total_samples,
-            )
-
-        self._current_session_uid = session_uid
-        self._samples = []
-        self._total_samples = 0
-
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        # Use short uid suffix for uniqueness
-        uid_short = str(session_uid)[-8:] if session_uid else "unknown"
-        filename = f"session_{ts}_{uid_short}.json"
-        self._session_file = self.data_dir / filename
-
-        self._session_meta = {
-            "session_uid": str(session_uid),
-            "start_time": datetime.now(timezone.utc).isoformat(),
-            "track": "",
-            "session_type": "",
-            "weather": "",
-        }
-        logger.info("New session started → %s", filename)
-
-    def flush(self):
-        """Write buffered samples to disk (append-only for performance)."""
-        if not self.enabled or not self._session_file or not self._samples:
-            return
-
-        try:
-            samples_to_write = self._samples
-            self._samples = []
-
-            if not self._session_file.exists():
-                # Create new file with metadata
-                data = {
-                    **self._session_meta,
-                    "total_samples": len(samples_to_write),
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
-                    "samples": samples_to_write,
-                }
-                with open(self._session_file, "w") as f:
-                    json.dump(data, f, separators=(",", ":"))
-            else:
-                # Append samples efficiently: read, extend, write
-                # Use a separate append file to avoid re-reading large files
-                append_file = self._session_file.with_suffix(".jsonl")
-                with open(append_file, "a") as f:
-                    for sample in samples_to_write:
-                        f.write(json.dumps(sample, separators=(",", ":")) + "\n")
-
-            flushed_count = len(samples_to_write)
-            logger.debug("Flushed %d samples to %s", flushed_count, self._session_file.name)
-        except Exception as e:
-            logger.error("Failed to flush session data: %s", e)
-
-    def close(self):
-        """Final flush on shutdown."""
-        if self.enabled:
-            self.flush()
-            if self._session_file and self._total_samples > 0:
-                logger.info(
-                    "Session saved: %s (%d total samples)",
-                    self._session_file.name,
-                    self._total_samples,
-                )
-
-
 recorder = SessionRecorder(config)
-
-# ---------------------------------------------------------------------------
-# WebSocket Manager
-# ---------------------------------------------------------------------------
-class ConnectionManager:
-    """Manages WebSocket connections and broadcasts."""
-
-    def __init__(self):
-        self.active_connections: Dict[Any, asyncio.Queue] = {}
-
-    def connect(self, ws):
-        # Queue of size 1: always holds only the latest message
-        self.active_connections[ws] = asyncio.Queue(maxsize=1)
-        asyncio.create_task(self._writer(ws))
-        logger.info("Client connected. Total: %d", len(self.active_connections))
-
-    def disconnect(self, ws):
-        self.active_connections.pop(ws, None)
-        logger.info("Client disconnected. Total: %d", len(self.active_connections))
-
-    async def _writer(self, ws):
-        """Per-client writer loop: sends latest message from queue."""
-        queue = self.active_connections.get(ws)
-        if not queue:
-            return
-        try:
-            while ws in self.active_connections:
-                message = await queue.get()
-                await ws.send(message)
-        except Exception:
-            self.disconnect(ws)
-
-    async def broadcast(self, message: str):
-        if not self.active_connections:
-            return
-        disconnected = []
-        for ws, queue in list(self.active_connections.items()):
-            try:
-                # Drop old message if queue is full, replace with latest
-                if queue.full():
-                    try:
-                        queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
-                queue.put_nowait(message)
-            except Exception:
-                disconnected.append(ws)
-        for ws in disconnected:
-            self.active_connections.pop(ws, None)
-
-
 manager = ConnectionManager()
 
-# ---------------------------------------------------------------------------
-# Telemetry State (latest data per type)
-# ---------------------------------------------------------------------------
 telemetry_state: Dict[str, Any] = {
     "telemetry": {},
     "motion": {},
@@ -363,61 +123,9 @@ telemetry_state: Dict[str, Any] = {
     "last_packet_time": 0,
 }
 
-# ---------------------------------------------------------------------------
-# UDP Listener
-# ---------------------------------------------------------------------------
-
-
-class F1UDPProtocol(asyncio.DatagramProtocol):
-    """Async UDP protocol handler for F1 telemetry packets."""
-
-    def __init__(self, parser: PacketParser):
-        self.parser = parser
-        self.packet_count = 0
-        self.error_count = 0
-
-    def connection_made(self, transport):
-        logger.info("UDP listener ready")
-
-    def datagram_received(self, data: bytes, addr):
-        self.packet_count += 1
-        result = self.parser.parse(data)
-        if result:
-            packet_type, parsed = result
-            telemetry_state[packet_type] = parsed
-            telemetry_state["connected"] = True
-            telemetry_state["last_packet_time"] = time.time()
-
-            # Record to session file (reuse header from parse)
-            header = parsed.get("session_time")
-            if header is not None:
-                session_uid = self.parser.parse_header(data)
-                if session_uid:
-                    recorder.record(str(session_uid["session_uid"]), telemetry_state)
-
-    def error_received(self, exc):
-        self.error_count += 1
-        logger.error("UDP error: %s", exc)
-
-
-async def start_udp_listener():
-    """Start the async UDP listener."""
-    parser = PacketParser(num_cars=config["telemetry"]["num_cars"])
-    loop = asyncio.get_running_loop()
-
-    udp_host = config["udp"]["host"]
-    udp_port = config["udp"]["port"]
-
-    transport, protocol = await loop.create_datagram_endpoint(
-        lambda: F1UDPProtocol(parser),
-        local_addr=(udp_host, udp_port),
-    )
-    logger.info("UDP listener started on %s:%d", udp_host, udp_port)
-    return transport, protocol
-
 
 # ---------------------------------------------------------------------------
-# Broadcast Loop
+# Broadcast & Flush Loops
 # ---------------------------------------------------------------------------
 async def broadcast_loop():
     """Broadcast telemetry state to WebSocket clients at a fixed rate."""
@@ -437,7 +145,6 @@ async def broadcast_loop():
             continue
 
         try:
-            # Always serialize fresh state right before sending
             message = json.dumps(telemetry_state, default=str)
             await manager.broadcast(message)
         except Exception as e:
@@ -445,7 +152,7 @@ async def broadcast_loop():
 
 
 async def flush_loop():
-    """Periodically flush recorded session data to disk in a thread (non-blocking)."""
+    """Periodically flush recorded session data to disk in a thread."""
     interval = config.get("storage", {}).get("flush_interval_seconds", 5)
     loop = asyncio.get_running_loop()
     while True:
@@ -455,7 +162,7 @@ async def flush_loop():
 
 
 # ---------------------------------------------------------------------------
-# HTTP Request Handler (stdlib asyncio)
+# HTTP Handler
 # ---------------------------------------------------------------------------
 STATIC_FILES = {
     "/": ("index.html", "text/html"),
@@ -464,6 +171,47 @@ STATIC_FILES = {
     "/app.js": ("app.js", "application/javascript"),
     "/charts.js": ("charts.js", "application/javascript"),
 }
+
+
+def _send_response(writer, status_code, content_type, body):
+    status_text = HTTPStatus(status_code).phrase
+    header = (
+        f"HTTP/1.1 {status_code} {status_text}\r\n"
+        f"Content-Type: {content_type}\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        f"Access-Control-Allow-Origin: *\r\n"
+        f"Connection: close\r\n"
+        f"\r\n"
+    )
+    writer.write(header.encode() + body)
+
+
+async def _handle_ai_feedback(writer):
+    """Call the Foundry agent with telemetry data and return JSON response."""
+    try:
+        telemetry_content = collect_session_data(recorder, telemetry_state)
+
+        if not telemetry_content or not telemetry_content.strip():
+            body = json.dumps({"ok": False, "error": "No session data available. Start a session first."}).encode()
+            _send_response(writer, 200, "application/json", body)
+            return
+
+        logger.info("AI Feedback: collected %d bytes of telemetry", len(telemetry_content))
+
+        loop = asyncio.get_running_loop()
+        response_text = await loop.run_in_executor(
+            None, lambda: call_foundry_agent(telemetry_content, config)
+        )
+
+        logger.info("AI Feedback: got response (%d chars)", len(response_text))
+        body = json.dumps({"ok": True, "feedback": response_text}).encode()
+        _send_response(writer, 200, "application/json", body)
+
+    except Exception as e:
+        logger.error("AI Feedback error: %s", e, exc_info=True)
+        error_msg = str(e).replace("\n", " ")[:200]
+        body = json.dumps({"ok": False, "error": error_msg}).encode()
+        _send_response(writer, 200, "application/json", body)
 
 
 async def handle_http(reader, writer):
@@ -482,11 +230,22 @@ async def handle_http(reader, writer):
 
         method, path = parts[0], parts[1]
 
-        # Read and discard remaining headers
+        # Read headers, capture content-length
+        content_length = 0
         while True:
             line = await asyncio.wait_for(reader.readline(), timeout=5.0)
             if line in (b"\r\n", b"\n", b""):
                 break
+            header_lower = line.decode("utf-8", errors="replace").lower()
+            if header_lower.startswith("content-length:"):
+                try:
+                    content_length = int(header_lower.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+
+        # Consume request body
+        if content_length > 0:
+            await reader.read(min(content_length, 1024 * 1024))
 
         # API endpoints
         if path == "/api/config":
@@ -503,6 +262,28 @@ async def handle_http(reader, writer):
                 "last_packet_time": telemetry_state["last_packet_time"],
             }).encode()
             _send_response(writer, 200, "application/json", body)
+
+        elif path == "/api/session/start" and method == "POST":
+            if recorder.data_dir.exists():
+                for f in recorder.data_dir.glob("session_*"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+            recorder._current_session_uid = None
+            recorder._samples = []
+            recorder._total_samples = 0
+            body = json.dumps({"ok": True}).encode()
+            _send_response(writer, 200, "application/json", body)
+
+        elif path == "/api/session/stop" and method == "POST":
+            recorder.flush()
+            samples = recorder._total_samples
+            body = json.dumps({"ok": True, "samples": samples}).encode()
+            _send_response(writer, 200, "application/json", body)
+
+        elif path == "/api/ai-feedback" and method == "POST":
+            await _handle_ai_feedback(writer)
 
         elif path == "/api/sessions":
             sessions = []
@@ -523,7 +304,6 @@ async def handle_http(reader, writer):
             body = json.dumps(sessions).encode()
             _send_response(writer, 200, "application/json", body)
 
-        # Static files
         elif path in STATIC_FILES:
             filename, content_type = STATIC_FILES[path]
             file_path = STATIC_DIR / filename
@@ -544,19 +324,6 @@ async def handle_http(reader, writer):
             await writer.wait_closed()
         except Exception:
             pass
-
-
-def _send_response(writer, status_code, content_type, body):
-    status_text = HTTPStatus(status_code).phrase
-    header = (
-        f"HTTP/1.1 {status_code} {status_text}\r\n"
-        f"Content-Type: {content_type}\r\n"
-        f"Content-Length: {len(body)}\r\n"
-        f"Access-Control-Allow-Origin: *\r\n"
-        f"Connection: close\r\n"
-        f"\r\n"
-    )
-    writer.write(header.encode() + body)
 
 
 # ---------------------------------------------------------------------------
@@ -580,30 +347,21 @@ async def handle_websocket(ws):
 # App Lifecycle
 # ---------------------------------------------------------------------------
 async def main():
-    print(f"F1 Telemetry Dashboard starting...")
+    print("F1 Telemetry Dashboard starting...")
     print(f"  UDP listener: {config['udp']['host']}:{config['udp']['port']}")
     print(f"  Web server:   http://localhost:{config['web']['port']}")
     print(f"  Open http://localhost:{config['web']['port']} in your browser")
     print()
 
-    # Start UDP listener
-    udp_transport, udp_protocol = await start_udp_listener()
-
-    # Start broadcast loop
+    udp_transport, _ = await start_udp_listener(config, telemetry_state, recorder)
     broadcast_task = asyncio.create_task(broadcast_loop())
-
-    # Start session data flush loop
     flush_task = asyncio.create_task(flush_loop())
 
-    # Start HTTP server for static files and API
     http_server = await asyncio.start_server(
-        handle_http,
-        config["web"]["host"],
-        config["web"]["port"],
+        handle_http, config["web"]["host"], config["web"]["port"]
     )
     logger.info("HTTP server started on %s:%d", config["web"]["host"], config["web"]["port"])
 
-    # Start WebSocket server on port+1
     ws_port = config["web"]["port"] + 1
     ws_server = await ws_serve(handle_websocket, config["web"]["host"], ws_port)
     logger.info("WebSocket server started on %s:%d", config["web"]["host"], ws_port)

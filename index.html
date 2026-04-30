@@ -16,6 +16,11 @@
         </div>
         <div class="status-center">
             <span id="session-info">Waiting for data...</span>
+            <div class="session-controls">
+                <button id="btn-start-session" class="ctrl-btn start-btn" onclick="startSession()">▶ Start</button>
+                <button id="btn-stop-session" class="ctrl-btn stop-btn" onclick="stopSession()">⏹ Stop</button>
+                <button id="btn-ai-feedback" class="ctrl-btn ai-btn" onclick="requestAIFeedback()">🤖 AI Feedback</button>
+            </div>
         </div>
         <div class="status-right">
             <span id="weather-info">--</span>
